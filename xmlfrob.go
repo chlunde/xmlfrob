@@ -82,6 +82,8 @@ func frobnicate(in io.Reader, modifications []modification) (*bytes.Buffer, erro
 	out := xml.NewEncoder(&outbytes)
 	var previousWasStart bool
 	var path bytes.Buffer
+	skip := false
+	pluginNo := 0
 	for {
 		tok, err := decoder.RawToken()
 		if err != nil {
@@ -95,6 +97,11 @@ func frobnicate(in io.Reader, modifications []modification) (*bytes.Buffer, erro
 			path.WriteByte('/')
 			path.WriteString(tok.Name.Local)
 
+			if path.String() == "/project/profiles/profile/build/plugins/plugin" {
+				skip = pluginNo == 0 || pluginNo == 1
+				pluginNo++
+			}
+
 			for _, pat := range modifications {
 				if path.String() == pat.path {
 					for i, attr := range tok.Attr {
@@ -106,48 +113,58 @@ func frobnicate(in io.Reader, modifications []modification) (*bytes.Buffer, erro
 			}
 
 			previousWasStart = true
-			if err := out.EncodeToken(tok); err != nil {
-				return nil, err
+			if !skip {
+				if err := out.EncodeToken(tok); err != nil {
+					return nil, err
+				}
 			}
 
 		case xml.EndElement:
+			cur := path.String()
 			path.Truncate(bytes.LastIndexByte(path.Bytes(), '/'))
+			if !skip {
+				if previousWasStart {
+					// hack: Replace <foo></foo> with self-closing tags <foo/>
+					// https://groups.google.com/forum/#!topic/golang-nuts/guG6iOCRu08
+					if err := out.Flush(); err != nil {
+						return nil, err
+					}
 
-			if previousWasStart {
-				// hack: Replace <foo></foo> with self-closing tags <foo/>
-				// https://groups.google.com/forum/#!topic/golang-nuts/guG6iOCRu08
-				if err := out.Flush(); err != nil {
-					return nil, err
-				}
+					if outbytes.Bytes()[outbytes.Len()-1] != '>' {
+						panic("expected > token as last byte in output")
+					}
+					pos := outbytes.Len() - 1
 
-				if outbytes.Bytes()[outbytes.Len()-1] != '>' {
-					panic("expected > token as last byte in output")
-				}
-				pos := outbytes.Len() - 1
+					// Encode end element so the encoder is not confused..
+					if err := out.EncodeToken(tok); err != nil {
+						return nil, err
+					}
 
-				// Encode end element so the encoder is not confused..
-				if err := out.EncodeToken(tok); err != nil {
-					return nil, err
-				}
+					if err := out.Flush(); err != nil {
+						return nil, err
+					}
 
-				if err := out.Flush(); err != nil {
-					return nil, err
+					// Back track to before end element and final >
+					outbytes.Truncate(pos)
+					outbytes.WriteString("/>")
+				} else {
+					if err := out.EncodeToken(tok); err != nil {
+						return nil, err
+					}
 				}
-
-				// Back track to before end element and final >
-				outbytes.Truncate(pos)
-				outbytes.WriteString("/>")
-			} else {
-				if err := out.EncodeToken(tok); err != nil {
-					return nil, err
-				}
+				previousWasStart = false
 			}
-			previousWasStart = false
+
+			if cur == "/project/profiles/profile/build/plugins/plugin" {
+				skip = false
+			}
 
 		default:
 			previousWasStart = false
-			if err := out.EncodeToken(tok); err != nil {
-				return nil, err
+			if !skip {
+				if err := out.EncodeToken(tok); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -178,9 +195,9 @@ func main() {
 
 	flag.Parse()
 
-	if flag.NArg() == 0 {
-		usage("At least one modification pattern required") // exits
-	}
+	//	if flag.NArg() == 0 {
+	//	usage("At least one modification pattern required") // exits
+	//}
 
 	if inplace && input == "-" {
 		fmt.Fprintf(os.Stderr, "Invalid arguments: cannot combine --inplace and --input - (stdin)\n")
